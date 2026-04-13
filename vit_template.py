@@ -368,7 +368,16 @@ class TransformerBlock(nn.Module):
         #     nn.Dropout(dropout)
         #     nn.Linear(mlp_dim, embed_dim)
         #     nn.Dropout(dropout)
-        raise NotImplementedError("TODO 1.3: implement TransformerBlock.__init__")
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.attn = MultiHeadSelfAttention(embed_dim= embed_dim, num_heads=num_heads, dropout= dropout)
+        self.mlp = nn.Sequential(
+            nn.Linear(embed_dim, mlp_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_dim, embed_dim),
+            nn.Dropout(dropout)
+            )
 
     def forward(
         self, x: torch.Tensor
@@ -384,7 +393,11 @@ class TransformerBlock(nn.Module):
         #     x           = x + self.mlp(self.norm2(x))
         #
         #   Return (x, attn_weights).
-        raise NotImplementedError("TODO 1.3: implement TransformerBlock.forward")
+        normed = self.norm1(x)
+        attn_out, attn_weights = self.attn(normed)
+        x = x + attn_out
+        x = x + self.mlp(self.norm2(x))
+        return (x, attn_weights)
 
 
 # ---------------------------------------------------------------------------
