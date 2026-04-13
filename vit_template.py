@@ -494,13 +494,32 @@ class VisionTransformer(nn.Module):
         #   nn.Parameter so they are learnable).
         #
         #   blocks is an nn.ModuleList; create num_layers TransformerBlock instances.
-        raise NotImplementedError("TODO 1.4: implement VisionTransformer.__init__")
+
+        self.patch_embed = PatchEmbedding(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1,embed_dim))
+        N = self.patch_embed.num_patches
+        self.pos_embed = nn.Parameter(torch.zeros(1, N+1, embed_dim))
+        self.blocks = nn.ModuleList([TransformerBlock(embed_dim=embed_dim, num_heads=num_heads, mlp_dim=mlp_dim, dropout=dropout) for i in range(num_layers)])
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, num_classes)
 
     def forward(
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         # TODO 1.4 ── Follow the 9-step guide in the docstring.
-        raise NotImplementedError("TODO 1.4: implement VisionTransformer.forward")
+
+        x = self.patch_embed(x)
+        cls_tokens= self.cls_token.expand(x.shape[0],-1,-1)
+        x = torch.cat([cls_tokens, x], dim = 1)
+        x = x +  self.pos_embed
+        attn_list = []
+        for block in self.blocks:
+            x,attn = block(x)
+            attn_list.append(attn)
+        x = self.norm(x)
+        cls_out = x[:,0]
+        logits = self.head(cls_out)
+        return (logits, attn_list)
 
 
 # =============================================================================
