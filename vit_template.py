@@ -200,7 +200,9 @@ class PatchEmbedding(nn.Module):
         #
         #   Hint: after the conv you have shape (B, D, G, G).
         #   Call .flatten(2) to get (B, D, N), then .transpose(1, 2) for (B, N, D).
-        raise NotImplementedError("TODO 1.1: implement PatchEmbedding.forward")
+        output = self.proj(x)
+        op_f = output.flatten(2)
+        return op_f.transpose(1,2)
 
 
 # ---------------------------------------------------------------------------
@@ -268,9 +270,16 @@ class MultiHeadSelfAttention(nn.Module):
         self.head_dim  = embed_dim // num_heads
         self.scale     = self.head_dim ** -0.5
 
+        
         # TODO 1.2 ── Create the four linear layers and the dropout layer
         #   described in the docstring above.
-        raise NotImplementedError("TODO 1.2: implement MultiHeadSelfAttention.__init__")
+
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.attn_drop = nn.Dropout(p = dropout)
+
 
     def forward(
         self, x: torch.Tensor
@@ -283,8 +292,27 @@ class MultiHeadSelfAttention(nn.Module):
         #     torch.matmul  or  the @ operator
         #     F.softmax(scores, dim=-1)
         #     tensor.transpose(1, 2).contiguous().reshape(B, T, self.embed_dim)
-        raise NotImplementedError("TODO 1.2: implement MultiHeadSelfAttention.forward")
+        Q = self.q_proj(x)
+        K = self.k_proj(x)
+        V = self.v_proj(x)
 
+        B = x.shape[0]
+        Q = Q.reshape(B, x.shape[1], self.num_heads, self.head_dim)
+        K = K.reshape(B, x.shape[1], self.num_heads, self.head_dim)
+        V = V.reshape(B, x.shape[1], self.num_heads, self.head_dim)
+
+
+        Q = Q.transpose(1, 2)
+        K = K.transpose(1, 2)
+        V = V.transpose(1, 2)
+        scores = Q @ K.transpose(-1,-2) * self.scale
+        scores = F.softmax(scores, dim=-1)
+        scores = self.attn_drop(scores)
+        context = scores @ V
+        context = context.transpose(1, 2).contiguous().reshape(x.shape[0], x.shape[1], self.embed_dim)
+        out = self.out_proj(context)
+        
+        return (out, scores)
 
 # ---------------------------------------------------------------------------
 
