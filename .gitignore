@@ -1,3 +1,4 @@
 dlenv/
 .vscode/
 __pycache__/
+data/

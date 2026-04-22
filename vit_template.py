@@ -608,7 +608,21 @@ def get_cifar10_subset(
     #   4. For each class 0-9, collect its indices in the training set,
     #      then randomly sample 500 of them.
     #   5. Return (Subset(train_dataset, selected_indices), test_dataset).
-    raise NotImplementedError("TODO 1.5: implement get_cifar10_subset")
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=(0.4914, 0.4822, 0.4465),
+                  std =(0.2470, 0.2435, 0.2616))
+    ])
+    train_dataset = datasets.CIFAR10(root=data_root, train=True, download=True, transform=transform)
+    test_dataset = datasets.CIFAR10(root=data_root, train=False, download=True, transform=transform)
+
+    selected_indices = []
+    set_all_seeds(get_seed())
+    for classid in range(10):
+        class_indices = [i for i,(_,target) in enumerate(train_dataset) if target == classid]
+        cls_idxs = random.sample(class_indices, 500)
+        selected_indices.extend(cls_idxs)
+    return (Subset(train_dataset, selected_indices), test_dataset)
 
 
 def train_model(
@@ -688,8 +702,83 @@ def train_model(
     • Use time.time() to measure epoch wall-clock time.
     • Create checkpoint_dir if it doesn't exist: os.makedirs(..., exist_ok=True)
     """
-    # TODO 1.6 ── Implement the training loop.
-    raise NotImplementedError("TODO 1.6: implement train_model")
+
+    optimizer = torch.optim.AdamW(model.parameters(),lr = config["lr"], weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["epochs"])
+    criterion = nn.CrossEntropyLoss()
+
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    history = []
+
+    train_loader = DataLoader(train_subset, batch_size=config["batch_size"], shuffle=True)
+    test_loader  = DataLoader(test_dataset, batch_size=config["batch_size"], shuffle=False)
+
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    for epoch in range(1,config["epochs"] + 1):
+
+        # epoch          : int   (1-indexed)
+        # train_loss     : float (mean cross-entropy loss over all training batches)
+        # val_accuracy   : float (fraction of test images correctly classified)
+        # epoch_time_sec : float (wall-clock seconds for that epoch)
+        start = time.time()
+        model.train()
+        correct = 0
+        total   = 0
+        total_loss   = 0.0
+        num_batches  = 0
+        for i,(data,target) in enumerate(train_loader):
+            optimizer.zero_grad()
+            logits,_ = model(data)
+            loss = criterion(logits,target)
+            loss.backward()
+            optimizer.step()
+            total_loss  += loss.item()
+            num_batches += 1
+
+        train_loss = total_loss / num_batches
+        model.eval()
+        with torch.no_grad():
+            for i,(data,target) in enumerate(test_loader):
+                logits,_ = model(data)
+                preds    = logits.argmax(dim=1)
+                correct += (preds == target).sum().item()
+                total   += target.size(0)
+        
+        val_accuracy   = correct / total
+        epoch_time_sec = time.time() - start
+        
+        scheduler.step()
+
+        history.append({
+            "epoch":          epoch,
+            "train_loss":     train_loss,
+            "val_accuracy":   val_accuracy,
+            "epoch_time_sec": epoch_time_sec,
+        })
+                
+        if epoch in checkpoint_epochs:
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "config":           model.config,
+                "epoch":            epoch,
+                "student_id":       STUDENT_ID,
+            }, f"{checkpoint_dir}/baseline_epoch_{epoch}.pt")
+    
+    log = {
+        "student_id":         STUDENT_ID,
+        "seed":               get_seed(),
+        "config":             config,
+        "history":            history,
+        "final_val_accuracy": history[-1]["val_accuracy"],
+        "total_params":       total_params,
+    }
+
+    if log_path is not None:
+        _save_json(log, log_path)
+
+    return log
 
 
 # =============================================================================
@@ -878,7 +967,40 @@ def compute_attention_entropy(
     • os.makedirs(os.path.dirname(output_path), exist_ok=True) before writing.
     """
     # TODO 3.1 -- Implement attention entropy computation.
-    raise NotImplementedError("TODO 3.1: implement compute_attention_entropy")
+    set_all_seeds(get_seed())
+    model = _load_baseline_checkpoint(checkpoint_path)
+ 
+    _, test_dataset = get_cifar10_subset()
+    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
+ 
+    num_layers = len(model.blocks)
+    layer_attn_sum = [None] * num_layers
+    num_images = 0
+ 
+    with torch.no_grad():
+        for images, _ in test_loader:
+            logits, attn_list = model(images)
+            B = images.shape[0]
+            num_images += B
+            for l, attn in enumerate(attn_list):
+                cls_attn = attn[:, :, 0, :]
+                batch_sum = cls_attn.sum(dim=0)
+                if layer_attn_sum[l] is None:
+                    layer_attn_sum[l] = batch_sum
+                else:
+                    layer_attn_sum[l] = layer_attn_sum[l] + batch_sum
+ 
+    result = {}
+    for l in range(num_layers):
+        avg_attn = layer_attn_sum[l] / num_images
+        mean_attn = avg_attn.mean(dim=0)
+        p = mean_attn.clamp(min=1e-9)
+        H = -(p * torch.log2(p)).sum().item()
+        result[f"layer_{l}"] = round(H, 4)
+    
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    _save_json(result, output_path)
+    return result
 
 
 def compute_pos_embed_correlation(
@@ -928,7 +1050,38 @@ def compute_pos_embed_correlation(
     • num_pairs = N * (N - 1) // 2
     """
     # TODO 3.2 -- Implement positional embedding correlation.
-    raise NotImplementedError("TODO 3.2: implement compute_pos_embed_correlation")
+    set_all_seeds(get_seed())
+    model = _load_baseline_checkpoint(checkpoint_path)
+ 
+    patch_size = model.config["patch_size"]
+    G = 32 // patch_size
+    N = G * G
+ 
+    pos_embed = model.pos_embed.data.squeeze(0)
+    embeddings = pos_embed[1:]
+ 
+    normed = F.normalize(embeddings, dim=-1)
+    S = normed @ normed.T
+ 
+    k_s = torch.arange(N)
+    rows = (k_s // G).float()
+    cols = (k_s % G).float()
+    cords = torch.stack([rows, cols], dim=1)
+    diff = cords[:, None, :] - cords[None, :, :]
+    E = diff.norm(dim=-1)
+ 
+    tri_idx = torch.triu_indices(N, N, offset=1)
+    s_vector = S[tri_idx[0], tri_idx[1]].numpy()
+    e_vector = E[tri_idx[0], tri_idx[1]].numpy()
+ 
+    pearson_r = float(np.corrcoef(s_vector, e_vector)[0, 1])
+    num_pairs = N * (N - 1) // 2
+ 
+    result = {"pearson_r": round(pearson_r, 4),"num_pairs": num_pairs}
+ 
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    _save_json(result, output_path)
+    return result
 
 
 def compute_per_class_accuracy(
@@ -971,7 +1124,49 @@ def compute_per_class_accuracy(
       Diagonal entries are correct predictions; off-diagonal are confusions.
     """
     # TODO 3.3 -- Implement per-class accuracy and confusion analysis.
-    raise NotImplementedError("TODO 3.3: implement compute_per_class_accuracy")
+    set_all_seeds(get_seed())
+    model = _load_baseline_checkpoint(checkpoint_path)
+ 
+    _, test_dataset = get_cifar10_subset()
+    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
+ 
+    all_true = []
+    all_pred = []
+ 
+    with torch.no_grad():
+        for images, labels in test_loader:
+            logits, _ = model(images)
+            preds = logits.argmax(dim=1)
+            all_true.append(labels)
+            all_pred.append(preds)
+ 
+    all_true = torch.cat(all_true)
+    all_pred = torch.cat(all_pred)
+ 
+    conf = torch.zeros(10, 10, dtype=torch.long)
+    for t, p in zip(all_true.tolist(), all_pred.tolist()):
+        conf[t][p] += 1
+ 
+    class_accuracies = {}
+    for c in range(10):
+        total_c = conf[c].sum().item()
+        correct_c = conf[c, c].item()
+        class_accuracies[str(c)] = round(correct_c / total_c if total_c > 0 else 0.0, 4) #accuracy_c
+ 
+    confusions = []
+    for t in range(10):
+        for p in range(10):
+            if t != p and conf[t, p].item() > 0:
+                confusions.append([t, p, conf[t, p].item()])
+ 
+    confusions.sort(key=lambda x: x[2], reverse=True)
+    top3_confs = confusions[:3]
+ 
+    result = {"class_accuracies": class_accuracies,"top3_confusions":  top3_confs}
+ 
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    _save_json(result, output_path)
+    return result
 
 
 def compute_attention_distance(
@@ -1022,7 +1217,48 @@ def compute_attention_distance(
       Then .mean(dim=-1) → (B, h), then .mean() for the scalar.
     """
     # TODO 3.4 -- Implement mean attention distance computation.
-    raise NotImplementedError("TODO 3.4: implement compute_attention_distance")
+    set_all_seeds(get_seed())
+    model = _load_baseline_checkpoint(checkpoint_path)
+ 
+    patch_size = model.config["patch_size"]
+    G = 32 // patch_size
+    N = G * G
+ 
+    ks = torch.arange(N)
+    row_k = (ks // G).float()
+    col_k = (ks % G).float()
+    cords = torch.stack([row_k, col_k], dim=1)
+    diff = cords[:, None, :] - cords[None, :, :]
+    D_grid = diff.norm(dim=-1)
+ 
+    _, test_dataset = get_cifar10_subset()
+    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
+ 
+    num_layers = len(model.blocks)
+    layer_dist_sum = [0.0] * num_layers
+    num_images = 0
+ 
+    with torch.no_grad():
+        
+        for images, _ in test_loader:
+            logits, attn_list = model(images)
+            B = images.shape[0]
+            num_images += B
+            for l, attn in enumerate(attn_list):
+                A_patch = attn[:, :, 1:, 1:]
+                A_patch = A_patch / A_patch.sum(dim=-1, keepdim=True).clamp(min=1e-9)
+                mean_dist_per_query = (A_patch * D_grid).sum(dim=-1)
+                layer_dist_sum[l] += mean_dist_per_query.mean(dim=-1).sum().item()
+ 
+    result = {}
+    for l in range(num_layers):
+        num_heads = model.blocks[l].attn.num_heads
+        mean_dist = layer_dist_sum[l] / (num_images * num_heads)
+        result[f"layer_{l}"] = round(mean_dist, 4)
+ 
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    _save_json(result, output_path)
+    return result
 
 
 # =============================================================================
