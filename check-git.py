@@ -50,7 +50,7 @@ def check(submission_dir: str) -> int:
     path = Path(submission_dir).resolve()
 
     print(f"\n{'='*55}")
-    print(f"  Git History Check  –  CS 676 Assignment 3")
+    print(f"  Git History Check  –  CSE 676 Assignment 1")
     print(f"{'='*55}")
     print(f"  Directory : {path}")
 
@@ -69,14 +69,8 @@ def check(submission_dir: str) -> int:
         return 2
 
     # ── 3. Fetch all commit timestamps (author date, ISO strict format) ───
-    rc, log_out, err = run_git(
-        ["log", "--format=%aI", "--no-walk=unsorted"],
-        path,
-    )
     # --format=%aI prints one ISO-8601 timestamp per commit.
-    # Fall back to a simpler log if the above returns nothing.
-    if rc != 0 or not log_out:
-        rc, log_out, err = run_git(["log", "--format=%aI"], path)
+    rc, log_out, err = run_git(["log", "--format=%aI"], path)
 
     if rc != 0 or not log_out:
         print(f"\n  ERROR: Could not read commit history.\n  {err}")
